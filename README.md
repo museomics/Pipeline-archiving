@@ -237,3 +237,6 @@ sbatch baRxiv.sh \
     --output /mnt/shared/projects/UKBOL_accelerated/main_archive \
     --skip-fastp
 ```
+
+
+> Created by Dan Parsons @NHMUK
