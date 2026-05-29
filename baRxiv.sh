@@ -2,8 +2,8 @@
 #SBATCH --job-name=baRxiv
 #SBATCH --output=baRxiv_%j.log
 #SBATCH --error=baRxiv_%j.err
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=16G
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=8G
 
 # =============================================================================
 # baRxiv.sh
@@ -13,21 +13,26 @@
 #
 # Usage:
 #   sbatch baRxiv.sh \
-#       --beegees   <dir1> [dir2 ...] \
-#       --skim2mito <dir1> [dir2 ...] \
-#       --reads     <path/to/read_archive/> \
-#       --output    <path/to/main_archive/> \
-#       [--skip-fastp] \
+#       --beegees        <dir1> [dir2 ...] \
+#       --skim2mito      <dir1> [dir2 ...] \
+#       --reads          <path/to/read_archive/> \
+#       --output         <path/to/main_archive/> \
+#       [--include-fastp] \
 #       [--include-plot-tree] \
 #       [--dry-run]
 #
 # Outputs per BeeGees run (run_name = basename of input dir):
 #   --reads/{run_name}/
-#       {run_name}_trimmed_reads.tar.gz      concat_mode trimmed reads for ENA upload
+#       {run_name}_trimmed_reads.tar.gz      concat_mode trimmed reads for ENA
+#                                            upload; _concat_trimmed.fq and
+#                                            trimming reports excluded
 #       {run_name}_trimmed_reads.tar.gz.txt  Contents listing
+#
 #   --output/{run_name}/
 #       {run_name}_beegees.tar.gz            All specified BeeGees outputs;
-#                                            read files excluded from trimmed_data
+#                                            read files excluded from both
+#                                            concat_mode and merge_mode
+#                                            trimmed_data directories
 #       {run_name}_beegees.tar.gz.txt        Contents listing
 #
 # Outputs per skim2mito run:
@@ -40,8 +45,13 @@
 #   - If any target archive already exists the script aborts immediately
 #   - Missing required files/dirs are warned and collected into a summary
 #     printed at the end of the log
-#   - Missing optional files/dirs (04_reference_filtered) are silently skipped
+#   - Missing optional outputs (04_reference_filtered) are silently skipped
+#     and do not appear in the missing files summary
 #   - --reads is only required when --beegees is provided
+#   - fastp/ is excluded from skim2mito archives by default (--include-fastp
+#     to include)
+#   - plot_tree/ is excluded from skim2mito archives by default
+#     (--include-plot-tree to include)
 # =============================================================================
 
 set -euo pipefail
@@ -62,7 +72,7 @@ SKIM2MITO_DIRS=()
 READS_DEST=""
 OUTPUT_DEST=""
 DRY_RUN=false
-SKIP_FASTP=false
+INCLUDE_FASTP=false
 INCLUDE_PLOT_TREE=false
 MISSING_ITEMS=()   # accumulates missing required paths for end-of-run summary
 
@@ -83,7 +93,7 @@ Options:
   --skim2mito      One or more skim2mito run output directories
   --reads          Destination for trimmed reads archives (required with --beegees)
   --output         Destination for all other archives
-  --skip-fastp     Exclude fastp/ from skim2mito archives
+  --include-fastp      Include fastp/ in skim2mito archives (excluded by default)
   --include-plot-tree  Include plot_tree/ in skim2mito archives (excluded by default)
   --dry-run        Print what would be done without creating any files
 EOF
@@ -104,7 +114,7 @@ while [[ $# -gt 0 ]]; do
             done ;;
         --reads)   READS_DEST="$2";  shift 2 ;;
         --output)  OUTPUT_DEST="$2"; shift 2 ;;
-        --skip-fastp)        SKIP_FASTP=true;        shift ;;
+        --include-fastp)     INCLUDE_FASTP=true;      shift ;;
         --include-plot-tree) INCLUDE_PLOT_TREE=true; shift ;;
         --dry-run)           DRY_RUN=true;           shift ;;
         -h|--help) usage ;;
@@ -142,6 +152,7 @@ check_no_overwrite() {
 
 # Add a relative path to the include list if it exists under run_dir.
 # Missing paths are warned and recorded in MISSING_ITEMS.
+# Args: list  run_dir  rel_path
 add_if_exists() {
     local full="${2}/${3}"
     if [[ -e "$full" ]]; then
@@ -153,6 +164,7 @@ add_if_exists() {
 }
 
 # Like add_if_exists but silently skips if absent — for truly optional outputs.
+# Args: list  run_dir  rel_path
 add_if_exists_optional() {
     local full="${2}/${3}"
     [[ -e "$full" ]] && echo "$3" >> "$1" || true
@@ -160,6 +172,7 @@ add_if_exists_optional() {
 
 # Add the first glob match under a subdir to the include list.
 # Missing matches are warned and recorded in MISSING_ITEMS.
+# Args: list  run_dir  pattern  [search_subdir]
 add_glob() {
     local list="$1" run_dir="$2" pattern="$3" search_dir="${4:-.}"
     local full_search="${run_dir}/${search_dir}"
@@ -176,6 +189,7 @@ add_glob() {
 
 # Create a tar.gz archive and companion .txt listing from an include-list file.
 # Any arguments after the first four are passed directly to tar (e.g. --exclude).
+# Args: archive  listing  run_dir  list_file  [extra_tar_flags...]
 create_archive() {
     local archive="$1" listing="$2" run_dir="$3" list_file="$4"
     shift 4
@@ -220,6 +234,7 @@ BEEGEES_READ_EXCLUDES=(
     --exclude="01_preprocessing/concat_mode/trimmed_data/*/*.fastq.gz"
     --exclude="01_preprocessing/concat_mode/trimmed_data/*/*.fq.gz"
     --exclude="01_preprocessing/merge_mode/trimmed_data/*_merged.fq"
+    --exclude="01_preprocessing/merge_mode/trimmed_data/*_merged.fastq"
     --exclude="01_preprocessing/merge_mode/trimmed_data/*_merged_clean.fq"
     --exclude="01_preprocessing/merge_mode/trimmed_data/*/*.fq"
     --exclude="01_preprocessing/merge_mode/trimmed_data/*/*.fq.gz"
@@ -245,7 +260,7 @@ archive_beegees() {
     fi
 
     # ----------------------------------------------------------------
-    # Reads archive -> --reads  (concat_mode trimmed_data, ENA upload)
+    # Reads archive → --reads  (concat_mode trimmed_data, ENA upload)
     # _concat_trimmed.fq excluded; paired .fastq.gz reads retained
     # ----------------------------------------------------------------
     local reads_list
@@ -258,12 +273,13 @@ archive_beegees() {
         "${reads_run_dir}/${run_name}_trimmed_reads.tar.gz" \
         "${reads_run_dir}/${run_name}_trimmed_reads.tar.gz.txt" \
         "$run_dir" "$reads_list" \
-        --exclude="01_preprocessing/concat_mode/trimmed_data/*/*_concat_trimmed.fq"
+        --exclude="01_preprocessing/concat_mode/trimmed_data/*/*_concat_trimmed.fq" \
+        --exclude="01_preprocessing/concat_mode/trimmed_data/*/*concat.fastq_trimming_report.txt"
 
     rm -f "$reads_list"
 
     # ----------------------------------------------------------------
-    # Backup archive -> --output  (all key outputs; read files excluded)
+    # Backup archive → --output  (all key outputs; read files excluded)
     # ----------------------------------------------------------------
     local out_list
     out_list="$(mktemp)"
@@ -338,6 +354,7 @@ archive_skim2mito() {
 
     local dirs=(
         "go_fetch"
+        "fastqc_raw"
         "fastqc_qc"
         "summary"
         "multiqc"
@@ -349,10 +366,10 @@ archive_skim2mito() {
         "blastn"
     )
 
-    if $SKIP_FASTP; then
-        log_info "Skipping fastp/ for $run_name (--skip-fastp)"
-    else
+    if $INCLUDE_FASTP; then
         dirs+=("fastp")
+    else
+        log_info "Skipping fastp/ for $run_name (use --include-fastp to include)"
     fi
 
     if $INCLUDE_PLOT_TREE; then
@@ -385,7 +402,7 @@ log_info "Output destination : $OUTPUT_DEST"
 log_info "Reads destination  : ${READS_DEST:-n/a}"
 log_info "BeeGees runs       : ${BEEGEES_DIRS[*]:-none}"
 log_info "skim2mito runs     : ${SKIM2MITO_DIRS[*]:-none}"
-log_info "Skip fastp         : $SKIP_FASTP"
+log_info "Include fastp      : $INCLUDE_FASTP"
 log_info "Include plot_tree  : $INCLUDE_PLOT_TREE"
 log_info "Dry run            : $DRY_RUN"
 
